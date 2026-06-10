@@ -48,6 +48,7 @@ export default function CameraView({
   const [hasCamera, setHasCamera] = useState<boolean | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [lockedEnemy, setLockedEnemy] = useState<Enemy | null>(null);
+  const [gyroActive, setGyroActive] = useState<boolean>(false);
 
   // Field of View (in radians)
   const FOV_X = (80 * Math.PI) / 180;
@@ -61,6 +62,7 @@ export default function CameraView({
   const isDraggingRef = useRef(false);
   const touchStartRef = useRef({ x: 0, y: 0 });
   const orientationStartRef = useRef({ yaw: 0, pitch: 0 });
+  const totalDragRef = useRef(0);
 
   // Access user's camera
   useEffect(() => {
@@ -106,6 +108,13 @@ export default function CameraView({
       let beta = event.beta ?? 0;   // Left/right/front tilt [-180, 180]
       let gamma = event.gamma ?? 0; // Left/right tilt [-90, 90]
 
+      // Detect active hardware gyro signal
+      if (event.alpha !== null && event.beta !== null && (event.alpha !== 0 || event.beta !== 0)) {
+        if (!gyroActive) {
+          setGyroActive(true);
+        }
+      }
+
       // Map phone rotation degrees to Radians
       // In iOS vertical-standing mode, beta is tilted around 60-80 degrees.
       // We'll calibrate so initial tilt is centering (0).
@@ -143,7 +152,7 @@ export default function CameraView({
     return () => {
       window.removeEventListener('deviceorientation', handleOrientation);
     };
-  }, [useGyros, setPlayerOrientation]);
+  }, [useGyros, setPlayerOrientation, gyroActive]);
 
   // Recalibrate gyroscope center
   const forceRecalibrateGaze = () => {
@@ -151,11 +160,36 @@ export default function CameraView({
     audio.playCalibrated();
   };
 
+  // Refs to hold the absolute latest values, bypassing React schedule/rendering jitter
+  const latestPropsRef = useRef({
+    playerYaw,
+    playerPitch,
+    enemies,
+    projectiles,
+    particles,
+    lockedEnemy,
+    scorePopups,
+    hasCamera,
+  });
+
+  // Sync ref values instantly on every single React render pass
+  latestPropsRef.current = {
+    playerYaw,
+    playerPitch,
+    enemies,
+    projectiles,
+    particles,
+    lockedEnemy,
+    scorePopups,
+    hasCamera,
+  };
+
   // Drag controls for swipe-to-aim fallback on desktop/mouse/failed orientation
   const handlePointerDown = (e: React.PointerEvent) => {
     isDraggingRef.current = true;
     touchStartRef.current = { x: e.clientX, y: e.clientY };
     orientationStartRef.current = { yaw: playerYaw, pitch: playerPitch };
+    totalDragRef.current = 0;
     
     // Set pointer capture to tracking dragging outside elements
     const element = e.currentTarget;
@@ -164,28 +198,39 @@ export default function CameraView({
 
   const handlePointerMove = (e: React.PointerEvent) => {
     if (!isDraggingRef.current) return;
-    // Skip manual swipe panning when Gyroscopes are actively controlling the gaze to avoid conflicting state updates.
-    if (useGyros) return;
 
     const deltaX = e.clientX - touchStartRef.current.x;
     const deltaY = e.clientY - touchStartRef.current.y;
 
-    // Movement sensitivity factor
+    // Track total cumulative movement distance
+    totalDragRef.current += Math.hypot(deltaX, deltaY);
+
+    // Update touchStartRef to latest so that delta acts relatively
+    touchStartRef.current = { x: e.clientX, y: e.clientY };
+
     const sens = swipeSensitivity;
+    const { playerYaw: curPlayerYaw, playerPitch: curPlayerPitch } = latestPropsRef.current;
 
-    // Natural grab-and-pull panning logic (swipe right to grab background leftwards and pan camera right etc.)
-    let targetYaw = orientationStartRef.current.yaw - deltaX * sens;
-    let targetPitch = orientationStartRef.current.pitch + deltaY * sens;
+    if (useGyros && gyroActive) {
+      // In active Gyro mode, adjust the gyro calibration baseline dynamically!
+      // This allows the user to swipe to offset their camera angle seamlessly!
+      gyroBaseRef.current.yaw += deltaX * sens;
+      gyroBaseRef.current.pitch += deltaY * sens;
+    } else {
+      // Standard relative swipe controls in swipe fallback / desktop mode
+      let targetYaw = curPlayerYaw + deltaX * sens;
+      let targetPitch = curPlayerPitch + deltaY * sens;
 
-    // Wrap yaw
-    while (targetYaw > Math.PI) targetYaw -= Math.PI * 2;
-    while (targetYaw < -Math.PI) targetYaw += Math.PI * 2;
+      // Wrap yaw between -PI and PI
+      while (targetYaw > Math.PI) targetYaw -= Math.PI * 2;
+      while (targetYaw < -Math.PI) targetYaw += Math.PI * 2;
 
-    // Clamp pitch
-    const maxP = (80 * Math.PI) / 180;
-    targetPitch = Math.max(-maxP, Math.min(maxP, targetPitch));
+      // Keep pitch in boundaries [-80, 80] degrees
+      const maxP = (80 * Math.PI) / 180;
+      targetPitch = Math.max(-maxP, Math.min(maxP, targetPitch));
 
-    setPlayerOrientation(targetYaw, targetPitch);
+      setPlayerOrientation(targetYaw, targetPitch);
+    }
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
@@ -193,10 +238,7 @@ export default function CameraView({
     isDraggingRef.current = false;
 
     // Trigger weapon shoot if they barely dragged (interpreted as a click/tap to fire)
-    const deltaX = Math.abs(e.clientX - touchStartRef.current.x);
-    const deltaY = Math.abs(e.clientY - touchStartRef.current.y);
-    
-    if (deltaX < 6 && deltaY < 6) {
+    if (totalDragRef.current < 15) {
       // Fire action! Pass locked enemy if any to verify direct hitting
       onFire(lockedEnemy ? lockedEnemy.id : null);
     }
@@ -212,6 +254,18 @@ export default function CameraView({
     let animationId: number;
 
     const render = () => {
+      // Pull absolute latest state variables from synchronized refs
+      const {
+        playerYaw: curPlayerYaw,
+        playerPitch: curPlayerPitch,
+        enemies: curEnemies,
+        projectiles: curProjectiles,
+        particles: curParticles,
+        lockedEnemy: curLockedEnemy,
+        scorePopups: curScorePopups,
+        hasCamera: curHasCamera,
+      } = latestPropsRef.current;
+
       // Set adaptive dimensions (handle rotating layouts gracefully)
       const rect = canvas.getBoundingClientRect();
       const width = rect.width;
@@ -225,7 +279,7 @@ export default function CameraView({
       ctx.clearRect(0, 0, width, height);
 
       // 1. Draw Starfield & Grid Backdrop Fallback if No Camera
-      if (!hasCamera) {
+      if (!curHasCamera) {
         // Sky glow background gradient
         const bgGrad = ctx.createRadialGradient(
           width / 2, height / 2, 10,
@@ -244,11 +298,11 @@ export default function CameraView({
           const sYaw = ((i * 11) % 360) * Math.PI / 180;
           const sPitch = ((((i * 7) % 120) - 60) * Math.PI) / 180;
 
-          let diffY = sYaw - playerYaw;
+          let diffY = sYaw - curPlayerYaw;
           while (diffY > Math.PI) diffY -= Math.PI * 2;
           while (diffY < -Math.PI) diffY += Math.PI * 2;
 
-          const diffP = sPitch - playerPitch;
+          const diffP = sPitch - curPlayerPitch;
 
           if (Math.abs(diffY) < FOV_X && Math.abs(diffP) < FOV_Y) {
             const sx = (width / 2) + (diffY / (FOV_X / 2)) * (width / 2);
@@ -267,7 +321,7 @@ export default function CameraView({
         // Horizontal lat lines
         for (let lat = -60; lat <= 60; lat += 20) {
           const latRad = (lat * Math.PI) / 180;
-          const diffP = latRad - playerPitch;
+          const diffP = latRad - curPlayerPitch;
           if (Math.abs(diffP) < FOV_Y / 2 + 0.1) {
             const sy = (height / 2) - (diffP / (FOV_Y / 2)) * (height / 2);
             ctx.beginPath();
@@ -279,7 +333,7 @@ export default function CameraView({
         // Vertical lon lines
         for (let lon = 0; lon < 360; lon += 30) {
           const lonRad = (lon * Math.PI) / 180;
-          let diffY = lonRad - playerYaw;
+          let diffY = lonRad - curPlayerYaw;
           while (diffY > Math.PI) diffY -= Math.PI * 2;
           while (diffY < -Math.PI) diffY += Math.PI * 2;
 
@@ -298,15 +352,15 @@ export default function CameraView({
       let closestDistanceToCenter = 9999;
 
       // 2. Project and Render Enemies
-      enemies.forEach((enemy) => {
+      curEnemies.forEach((enemy) => {
         const enemyYawRad = (enemy.yaw * Math.PI) / 180;
         const enemyPitchRad = (enemy.pitch * Math.PI) / 180;
 
-        let diffY = enemyYawRad - playerYaw;
+        let diffY = enemyYawRad - curPlayerYaw;
         while (diffY > Math.PI) diffY -= Math.PI * 2;
         while (diffY < -Math.PI) diffY += Math.PI * 2;
 
-        const diffP = enemyPitchRad - playerPitch;
+        const diffP = enemyPitchRad - curPlayerPitch;
 
         // Is the enemy visible inside camera FOV boundaries?
         if (Math.abs(diffY) < FOV_X / 2 + 0.15 && Math.abs(diffP) < FOV_Y / 2 + 0.15) {
@@ -550,12 +604,12 @@ export default function CameraView({
       }
 
       // 3. Render Floating Projectiles
-      projectiles.forEach((proj) => {
-        let diffY = proj.yaw - playerYaw;
+      curProjectiles.forEach((proj) => {
+        let diffY = proj.yaw - curPlayerYaw;
         while (diffY > Math.PI) diffY -= Math.PI * 2;
         while (diffY < -Math.PI) diffY += Math.PI * 2;
 
-        const diffP = proj.pitch - playerPitch;
+        const diffP = proj.pitch - curPlayerPitch;
 
         // Is projectile on screen?
         if (Math.abs(diffY) < FOV_X / 2 + 0.1 && Math.abs(diffP) < FOV_Y / 2 + 0.1) {
@@ -597,12 +651,12 @@ export default function CameraView({
       });
 
       // 4. Render Particle Explosions
-      particles.forEach((p) => {
-        let diffY = p.yaw - playerYaw;
+      curParticles.forEach((p) => {
+        let diffY = p.yaw - curPlayerYaw;
         while (diffY > Math.PI) diffY -= Math.PI * 2;
         while (diffY < -Math.PI) diffY += Math.PI * 2;
 
-        const diffP = p.pitch - playerPitch;
+        const diffP = p.pitch - curPlayerPitch;
 
         if (Math.abs(diffY) < FOV_X / 2 + 0.1 && Math.abs(diffP) < FOV_Y / 2 + 0.1) {
           const sx = (width / 2) + (diffY / (FOV_X / 2)) * (width / 2);
@@ -699,7 +753,7 @@ export default function CameraView({
 
       // 6. Draw floating score damage numbers
       ctx.save();
-      scorePopups.forEach((popup) => {
+      curScorePopups.forEach((popup) => {
         if (popup.life > 0) {
           ctx.fillStyle = 'rgba(52, 211, 153, ' + popup.life + ')';
           ctx.font = 'bold 16px monospace';
@@ -712,15 +766,15 @@ export default function CameraView({
       ctx.restore();
 
       // 6.5 Draw offscreen indicators for enemies that are out of standard view scope
-      enemies.forEach((enemy) => {
+      curEnemies.forEach((enemy) => {
         const enemyYawRad = (enemy.yaw * Math.PI) / 180;
         const enemyPitchRad = (enemy.pitch * Math.PI) / 180;
 
-        let diffY = enemyYawRad - playerYaw;
+        let diffY = enemyYawRad - curPlayerYaw;
         while (diffY > Math.PI) diffY -= Math.PI * 2;
         while (diffY < -Math.PI) diffY += Math.PI * 2;
 
-        const diffP = enemyPitchRad - playerPitch;
+        const diffP = enemyPitchRad - curPlayerPitch;
 
         const isOffscreen = Math.abs(diffY) >= (FOV_X / 2) || Math.abs(diffP) >= (FOV_Y / 2);
         if (isOffscreen) {
@@ -807,7 +861,7 @@ export default function CameraView({
         }
       });
 
-      // Overlap next animation frame
+      // Overlap next animation frame for silky-smooth continuous hardware rendering (60fps)
       animationId = requestAnimationFrame(render);
     };
 
@@ -816,7 +870,7 @@ export default function CameraView({
     return () => {
       cancelAnimationFrame(animationId);
     };
-  }, [enemies, projectiles, particles, playerYaw, playerPitch, hasCamera, lockedEnemy, scorePopups]);
+  }, []);
 
   return (
     <div

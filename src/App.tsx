@@ -66,22 +66,20 @@ export default function App() {
     gameConfig,
   });
 
-  // Keep stateRef synced
-  useEffect(() => {
-    stateRef.current = {
-      stage,
-      enemies,
-      projectiles,
-      particles,
-      playerOrientation,
-      shield,
-      stats,
-      wave,
-      isWaveSpawning,
-      scorePopups,
-      gameConfig,
-    };
-  }, [stage, enemies, projectiles, particles, playerOrientation, shield, stats, wave, isWaveSpawning, scorePopups, gameConfig]);
+  // Keep stateRef synced instantly on every render pass
+  stateRef.current = {
+    stage,
+    enemies,
+    projectiles,
+    particles,
+    playerOrientation,
+    shield,
+    stats,
+    wave,
+    isWaveSpawning,
+    scorePopups,
+    gameConfig,
+  };
 
   // Load High score on mount
   useEffect(() => {
