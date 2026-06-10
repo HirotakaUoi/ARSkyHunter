@@ -1,0 +1,6 @@
+{
+  "name": "AR Camera Shooter",
+  "description": "iPhone/iPadのカメラで見える現実世界を飛び回る敵を撃ち落とす360度ARシューティングゲーム。ジャイロセンサー/画面ドラッグ両対応、爽快なシンセ効果音搭載。",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
